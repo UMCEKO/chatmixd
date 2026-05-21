@@ -17,15 +17,18 @@ static HOME_DIR: OnceLock<String> = OnceLock::new();
 
 fn main() -> ! {
     if let Some(home_dir) = std::env::home_dir().map(|f| f.to_str().unwrap().to_string()) {
-        if !std::fs::exists(&format!("{home_dir}/.config/chatmixd/blacklist.conf"))
-            .unwrap_or_default()
-        {
-            std::fs::create_dir_all(&format!("{home_dir}/.config/chatmixd/blacklist.conf"))
-                .unwrap();
+        let config_dir = format!("{home_dir}/.config/chatmixd");
+        let blacklist_path = format!("{config_dir}/blacklist.conf");
+        if !std::fs::exists(&blacklist_path).unwrap_or_default() {
+            // Create the parent directory (NOT the file path) and then touch the
+            // blacklist file. Upstream's version called `create_dir_all` with the
+            // blacklist path, which created a directory at that path and made the
+            // subsequent open() fail.
+            std::fs::create_dir_all(&config_dir).unwrap();
             std::fs::File::options()
                 .write(true)
                 .create_new(true)
-                .open(&format!("{home_dir}/.config/chatmixd/blacklist.conf"))
+                .open(&blacklist_path)
                 .unwrap();
         }
         HOME_DIR.set(home_dir).unwrap();
