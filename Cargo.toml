@@ -1,0 +1,8 @@
+[package]
+name = "chatmixd"
+version = "0.2.0"
+edition = "2024"
+license = "MIT"
+description = "SteelSeries ChatMix daemon for Linux (PipeWire/PulseAudio)"
+repository = "https://github.com/UMCEKO/chatmixd"
+readme = "README.md"
