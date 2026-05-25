@@ -12,6 +12,7 @@ const CHATMIX_CODE: u8 = 69; // Opcode for chatmix signal
 const HEADSET_POWER: u8 = 185; // Opcode for power
 const GAME: &str = "Game";
 const CHAT: &str = "Chat";
+const SS_VENDOR_ID_PROP: &str = "0x1038"; // SteelSeries USB VID, as printed by `pactl list sinks`
 
 static HOME_DIR: OnceLock<String> = OnceLock::new();
 
@@ -117,7 +118,49 @@ fn in_blacklist(sink_name: &str) -> bool {
     false
 }
 
+/// Scan `pactl list sinks` (long form) for a sink whose USB vendor ID
+/// matches SteelSeries. The chatmix routing target is the user's headset,
+/// not whatever PipeWire currently considers the system default — those
+/// can diverge (e.g. HDMI audio becomes default after a monitor wake, or
+/// the headset hasn't been promoted to default yet). Iterating sinks by
+/// vendor ID makes the target deterministic.
+fn find_steelseries_sink() -> Option<u32> {
+    let out = Command::new("pactl")
+        .arg("list")
+        .arg("sinks")
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8(out.stdout).ok()?;
+
+    let mut current_id: Option<u32> = None;
+    let mut current_is_ss = false;
+
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("Sink #") {
+            if current_is_ss {
+                return current_id;
+            }
+            current_id = rest.parse::<u32>().ok();
+            current_is_ss = false;
+        }
+        // pactl renders properties as: `device.vendor.id = "0x1038"`
+        if trimmed.starts_with("device.vendor.id") && trimmed.contains(SS_VENDOR_ID_PROP) {
+            current_is_ss = true;
+        }
+    }
+    if current_is_ss { current_id } else { None }
+}
+
 fn get_default_sink() -> Option<u32> {
+    // Prefer a SteelSeries-owned sink for the chatmix routing target. Falls
+    // back to the system default sink only if no SteelSeries sink is present
+    // (e.g. headset entirely unplugged), in which case the original
+    // default-sink + blacklist behaviour applies.
+    if let Some(id) = find_steelseries_sink() {
+        return Some(id);
+    }
+
     let default_sink_name_bytes = Command::new("pactl")
         .arg("get-default-sink")
         .output()
