@@ -236,7 +236,7 @@ fn configure_sinks() -> bool {
 }
 
 fn read_device(mut file: File) {
-    let mut buf = [8u8; 4];
+    let mut buf = [0u8; 4];
     while let Ok(()) = file.read_exact(&mut buf) {
         process_bytes(buf);
     }
