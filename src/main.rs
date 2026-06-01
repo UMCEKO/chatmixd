@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsString,
     fs::{File, OpenOptions},
     io::Read,
     process::{Command, Stdio},
@@ -17,7 +18,8 @@ const SS_VENDOR_ID_PROP: &str = "0x1038"; // SteelSeries USB VID, as printed by 
 static HOME_DIR: OnceLock<String> = OnceLock::new();
 
 fn main() -> ! {
-    if let Some(home_dir) = std::env::home_dir().map(|f| f.to_str().unwrap().to_string()) {
+    if let Some(home_dir) = std::env::home_dir().and_then(|f| f.into_os_string().into_string().ok())
+    {
         let config_dir = format!("{home_dir}/.config/chatmixd");
         let blacklist_path = format!("{config_dir}/blacklist.conf");
         if !std::fs::exists(&blacklist_path).unwrap_or_default() {
@@ -25,14 +27,19 @@ fn main() -> ! {
             // blacklist file. Upstream's version called `create_dir_all` with the
             // blacklist path, which created a directory at that path and made the
             // subsequent open() fail.
-            std::fs::create_dir_all(&config_dir).unwrap();
-            std::fs::File::options()
+            if let Err(e) = std::fs::create_dir_all(&config_dir) {
+                eprintln!("Unable to create config dir {config_dir}: {e}");
+            } else if let Err(e) = std::fs::File::options()
                 .write(true)
                 .create_new(true)
                 .open(&blacklist_path)
-                .unwrap();
+            {
+                eprintln!("Unable to create blacklist file {blacklist_path}: {e}");
+            }
         }
-        HOME_DIR.set(home_dir).unwrap();
+        let _ = HOME_DIR.set(home_dir);
+    } else {
+        eprintln!("No HOME directory found; blacklist support disabled.");
     }
 
     loop {
@@ -52,52 +59,54 @@ fn main() -> ! {
 }
 
 fn get_devices() -> Vec<File> {
-    std::fs::read_dir("/dev/")
-        .unwrap()
+    let entries = match std::fs::read_dir("/dev/") {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("Cannot enumerate /dev: {e}");
+            return Vec::new();
+        }
+    };
+
+    entries
         .filter_map(|f| {
-            let t = f.unwrap().file_name().into_string().unwrap();
-            if !t.starts_with("hidraw") {
+            let entry = f.ok()?;
+            let name_os: OsString = entry.file_name();
+            let name = name_os.into_string().ok()?;
+            if !name.starts_with("hidraw") {
                 return None;
             }
             // Only open SteelSeries devices. Reading every hidraw on the system
             // means non-SteelSeries reports (e.g. analog-keyboard frames from a
             // Wooting that happen to start with `0x45`) get pattern-matched as
             // chatmix events, producing phantom volume changes.
-            if !dev::is_steelseries(&t) {
+            if !dev::is_steelseries(&name) {
                 return None;
             }
-            let dev = OpenOptions::new().read(true).open(format!("/dev/{t}")).ok()?;
-            println!("Listening to /dev/{t}");
-            dev::determine_if_arctis_nova_pro(t);
+            let dev = OpenOptions::new()
+                .read(true)
+                .open(format!("/dev/{name}"))
+                .ok()?;
+            println!("Listening to /dev/{name}");
+            dev::determine_if_arctis_nova_pro(name);
             Some(dev)
         })
         .collect()
 }
 
-fn get_device_id(device_name: &str) -> u32 {
-    let mut pactl_out = Command::new("pactl")
+fn get_device_id(device_name: &str) -> Option<u32> {
+    let pactl_out = Command::new("pactl")
         .arg("list")
         .arg("sinks")
         .arg("short")
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-
-    pactl_out.wait().unwrap();
-
-    let grep_out = Command::new("grep")
-        .arg(device_name)
-        .stdin(Stdio::from(pactl_out.stdout.take().unwrap()))
         .output()
-        .unwrap()
-        .stdout;
+        .ok()?;
+    let stdout = String::from_utf8(pactl_out.stdout).ok()?;
 
-    String::from_utf8(grep_out)
-        .unwrap()
-        .split_ascii_whitespace()
-        .nth(0)
+    stdout
+        .lines()
+        .find(|line| line.contains(device_name))
+        .and_then(|line| line.split_ascii_whitespace().next())
         .and_then(|sink_code| sink_code.parse::<u32>().ok())
-        .unwrap()
 }
 
 fn in_blacklist(sink_name: &str) -> bool {
@@ -161,25 +170,30 @@ fn get_default_sink() -> Option<u32> {
         return Some(id);
     }
 
-    let default_sink_name_bytes = Command::new("pactl")
-        .arg("get-default-sink")
-        .output()
-        .unwrap()
-        .stdout;
+    let out = Command::new("pactl").arg("get-default-sink").output().ok()?;
+    let default_sink_name = String::from_utf8(out.stdout).ok()?.trim().to_owned();
 
-    let default_sink_name = String::from_utf8(default_sink_name_bytes)
-        .map(|f| f.trim().to_owned())
-        .unwrap();
-
-    if default_sink_name.is_empty() {
+    if default_sink_name.is_empty() || in_blacklist(&default_sink_name) {
         return None;
     }
 
-    if in_blacklist(&default_sink_name) {
-        return None;
-    }
+    get_device_id(&default_sink_name)
+}
 
-    Some(get_device_id(&default_sink_name))
+/// Run `pactl <args>` for side-effect; log on failure, don't panic.
+fn pactl_run(args: &[&str]) {
+    match Command::new("pactl")
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        Ok(status) if !status.success() => {
+            eprintln!("pactl {} exited with {status}", args.join(" "));
+        }
+        Err(e) => eprintln!("Failed to spawn pactl {}: {e}", args.join(" ")),
+        _ => {}
+    }
 }
 
 fn configure_sinks() -> bool {
@@ -190,47 +204,28 @@ fn configure_sinks() -> bool {
         return false;
     };
 
-    let load_null_sink = |sink_name: &str| {
-        Command::new("pactl")
-            .arg("load-module")
-            .arg("module-null-sink")
-            .arg(format!("sink_name={sink_name}"))
-            .stdout(Stdio::null())
-            .spawn()
-            .unwrap()
-            .wait()
-            .unwrap();
-    };
+    let sink_id = default_sink.to_string();
 
-    let load_loopback = |source: &str| {
-        Command::new("pactl")
-            .arg("load-module")
-            .arg("module-loopback")
-            .arg(format!("source={source}.monitor"))
-            .arg(format!("sink={default_sink}"))
-            .stdout(Stdio::null())
-            .spawn()
-            .unwrap()
-            .wait()
-            .unwrap();
-    };
-
-    load_null_sink(GAME);
-    load_null_sink(CHAT);
-
-    load_loopback(GAME);
-    load_loopback(CHAT);
+    pactl_run(&["load-module", "module-null-sink", &format!("sink_name={GAME}")]);
+    pactl_run(&["load-module", "module-null-sink", &format!("sink_name={CHAT}")]);
+    pactl_run(&[
+        "load-module",
+        "module-loopback",
+        &format!("source={GAME}.monitor"),
+        &format!("sink={sink_id}"),
+    ]);
+    pactl_run(&[
+        "load-module",
+        "module-loopback",
+        &format!("source={CHAT}.monitor"),
+        &format!("sink={sink_id}"),
+    ]);
 
     // Promote Game to default sink ONCE on (re)configuration so generic
     // applications route through the chatmix split. Previously this was
     // re-issued on every HID packet, which clobbered the user's chosen
     // default sink on every micro-twist of the chatmix dial.
-    Command::new("pactl")
-        .arg("set-default-sink")
-        .arg(GAME)
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    pactl_run(&["set-default-sink", GAME]);
 
     true
 }
@@ -246,21 +241,12 @@ fn process_bytes(bytes: [u8; 4]) {
     static IS_CONF: Mutex<bool> = Mutex::new(false);
 
     let set_volume = |channel: &str, vol: u8| {
-        Command::new("pactl")
-            .arg("set-sink-volume")
-            .arg(format!("{}", channel))
-            .arg(format!("{}%", vol))
-            .output()
-            .unwrap();
+        pactl_run(&["set-sink-volume", channel, &format!("{vol}%")]);
     };
 
     let (code, game_vol, chat_vol) = match bytes {
-        [code @ (CHATMIX_CODE | HEADSET_POWER), game_vol, chat_vol, 0] => {
-            (code, game_vol, chat_vol)
-        }
-        [7, code @ (CHATMIX_CODE | HEADSET_POWER), game_vol, chat_vol] => {
-            (code, game_vol, chat_vol)
-        }
+        [code @ (CHATMIX_CODE | HEADSET_POWER), game_vol, chat_vol, 0] => (code, game_vol, chat_vol),
+        [7, code @ (CHATMIX_CODE | HEADSET_POWER), game_vol, chat_vol] => (code, game_vol, chat_vol),
         _ => return,
     };
 
@@ -303,30 +289,28 @@ fn process_bytes(bytes: [u8; 4]) {
 }
 
 fn cleanup_sinks() {
-    Command::new("pactl")
-        .arg("unload-module")
-        .arg("module-loopback")
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap()
-        .wait()
-        .unwrap();
+    pactl_run(&["unload-module", "module-loopback"]);
 
     let destroy_sinks = |name: &str| {
         loop {
-            let stat = Command::new("pw-cli")
+            let out = match Command::new("pw-cli")
                 .arg("destroy")
                 .arg(name)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
-                .spawn()
-                .unwrap()
-                .wait_with_output()
-                .unwrap();
+                .output()
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    eprintln!("Failed to spawn pw-cli destroy {name}: {e}");
+                    return;
+                }
+            };
 
-            // Prints to stderr whenever an error occurs, such as there being no sink by the given name
-            // Despite printing to stderr, _the exit status is still 0_
-            if stat.stderr.len() > 0 {
+            // pw-cli prints to stderr whenever an error occurs (e.g. no sink by
+            // that name). Despite that, the exit status is still 0. Loop until
+            // stderr is non-empty, meaning no more instances of the sink remain.
+            if !out.stderr.is_empty() {
                 break;
             }
         }
