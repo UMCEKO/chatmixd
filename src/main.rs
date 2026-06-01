@@ -221,6 +221,17 @@ fn configure_sinks() -> bool {
     load_loopback(GAME);
     load_loopback(CHAT);
 
+    // Promote Game to default sink ONCE on (re)configuration so generic
+    // applications route through the chatmix split. Previously this was
+    // re-issued on every HID packet, which clobbered the user's chosen
+    // default sink on every micro-twist of the chatmix dial.
+    Command::new("pactl")
+        .arg("set-default-sink")
+        .arg(GAME)
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
     true
 }
 
@@ -274,7 +285,6 @@ fn process_bytes(bytes: [u8; 4]) {
                 cleanup_sinks();
                 *conf = false;
             }
-            return; // Return early bc we dont want to set the default sink to anything
         }
         HEADSET_POWER if game_vol == 3 => {
             // Power on
@@ -286,13 +296,10 @@ fn process_bytes(bytes: [u8; 4]) {
         }
         _ => unreachable!(),
     }
-
-    Command::new("pactl")
-        .arg("set-default-sink")
-        .arg("Game")
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    // `pactl set-default-sink Game` deliberately runs ONLY inside
+    // configure_sinks() (where Game and Chat are newly created). Doing it
+    // here on every HID packet would clobber whatever default sink the user
+    // (or PipeWire on hotplug) has set, on every twist of the chatmix dial.
 }
 
 fn cleanup_sinks() {
