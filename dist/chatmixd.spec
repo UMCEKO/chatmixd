@@ -1,10 +1,10 @@
-%global commit      82f42e5c63afef2acfa37a29ab8972c98ca708d4
+%global commit      1b924448e6b34c7d568962c232b8f562eb86e32f
 %global shortcommit %(c=%{commit}; echo ${c:0:7})
 %global snapdate    20260601
 
 Name:           chatmixd
 Version:        0.2.0
-Release:        3.%{snapdate}git%{shortcommit}%{?dist}
+Release:        4.%{snapdate}git%{shortcommit}%{?dist}
 Summary:        SteelSeries ChatMix daemon for Linux (PipeWire/PulseAudio)
 
 License:        MIT
@@ -44,6 +44,9 @@ install -Dm0644 dist/99-%{name}.rules   %{buildroot}%{_udevrulesdir}/99-%{name}.
 %{_udevrulesdir}/99-%{name}.rules
 
 %changelog
+* Mon Jun 01 2026 UMCEKO <umutcevdetkocak@gmail.com> - 0.2.0-4.20260601git1b92444
+- Snapshot 1b92444: zero-initialize the HID read buffer
+
 * Mon Jun 01 2026 UMCEKO <umutcevdetkocak@gmail.com> - 0.2.0-3.20260601git82f42e5
 - Snapshot 82f42e5: log actionable errors instead of silent None
 
