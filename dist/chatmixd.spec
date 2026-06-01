@@ -1,10 +1,10 @@
-%global commit      f55d0349028bf70d985e661248e94871f5aae4a4
+%global commit      beb08512df179058c3651971000fdfca51d3e663
 %global shortcommit %(c=%{commit}; echo ${c:0:7})
 %global snapdate    20260601
 
 Name:           chatmixd
 Version:        0.2.0
-Release:        1.%{snapdate}git%{shortcommit}%{?dist}
+Release:        2.%{snapdate}git%{shortcommit}%{?dist}
 Summary:        SteelSeries ChatMix daemon for Linux (PipeWire/PulseAudio)
 
 License:        MIT
@@ -44,5 +44,8 @@ install -Dm0644 dist/99-%{name}.rules   %{buildroot}%{_udevrulesdir}/99-%{name}.
 %{_udevrulesdir}/99-%{name}.rules
 
 %changelog
+* Mon Jun 01 2026 UMCEKO <umutcevdetkocak@gmail.com> - 0.2.0-2.20260601gitbeb0851
+- Snapshot beb0851: uaccess udev rule (no audio-group membership needed)
+
 * Mon Jun 01 2026 UMCEKO <umutcevdetkocak@gmail.com> - 0.2.0-1.20260601gitf55d034
 - Initial RPM packaging (git snapshot)
