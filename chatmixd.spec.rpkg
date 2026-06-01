@@ -1,7 +1,8 @@
 # rpkg template. COPR's "rpkg" SCM build method preprocesses this at build
 # time, deriving the version/release/source straight from git -- so a plain
 # `git push` produces a new, correctly-ordered package with no manual edits.
-# The {{{ ... }}} macros come from rpkg-util.
+# The triple-brace macros below come from rpkg-util and are NOT shell -- but
+# beware: rpkg executes ANY triple-brace block as shell, even inside comments.
 Name:           chatmixd
 Version:        {{{ git_dir_version }}}
 Release:        1%{?dist}
