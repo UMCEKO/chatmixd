@@ -9,7 +9,6 @@ Summary:        SteelSeries ChatMix daemon for Linux (PipeWire/PulseAudio)
 
 License:        MIT
 URL:            https://github.com/UMCEKO/chatmixd
-VCS:            {{{ git_dir_vcs }}}
 Source0:        {{{ git_dir_pack }}}
 
 BuildRequires:  cargo
