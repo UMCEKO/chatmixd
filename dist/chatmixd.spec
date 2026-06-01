@@ -1,10 +1,10 @@
-%global commit      beb08512df179058c3651971000fdfca51d3e663
+%global commit      82f42e5c63afef2acfa37a29ab8972c98ca708d4
 %global shortcommit %(c=%{commit}; echo ${c:0:7})
 %global snapdate    20260601
 
 Name:           chatmixd
 Version:        0.2.0
-Release:        2.%{snapdate}git%{shortcommit}%{?dist}
+Release:        3.%{snapdate}git%{shortcommit}%{?dist}
 Summary:        SteelSeries ChatMix daemon for Linux (PipeWire/PulseAudio)
 
 License:        MIT
@@ -44,6 +44,9 @@ install -Dm0644 dist/99-%{name}.rules   %{buildroot}%{_udevrulesdir}/99-%{name}.
 %{_udevrulesdir}/99-%{name}.rules
 
 %changelog
+* Mon Jun 01 2026 UMCEKO <umutcevdetkocak@gmail.com> - 0.2.0-3.20260601git82f42e5
+- Snapshot 82f42e5: log actionable errors instead of silent None
+
 * Mon Jun 01 2026 UMCEKO <umutcevdetkocak@gmail.com> - 0.2.0-2.20260601gitbeb0851
 - Snapshot beb0851: uaccess udev rule (no audio-group membership needed)
 
