@@ -41,6 +41,14 @@ Then enable the user service:
 systemctl --user enable --now chatmixd
 ```
 
+### Fedora (COPR)
+
+```sh
+sudo dnf copr enable umceko/chatmixd
+sudo dnf install chatmixd
+systemctl --user enable --now chatmixd
+```
+
 ### From source
 
 ```sh

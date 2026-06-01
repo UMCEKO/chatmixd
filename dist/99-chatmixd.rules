@@ -1,6 +1,9 @@
-# Allow audio-group users to read SteelSeries hidraw nodes for chatmixd.
-# 0x1038 = SteelSeries USB vendor ID.
-KERNEL=="hidraw*", ATTRS{idVendor}=="1038", MODE="0640", GROUP="audio"
-
-# Arctis Nova Pro (idProduct=12e0) needs write access for the init sequence.
-KERNEL=="hidraw*", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="12e0", MODE="0660", GROUP="audio"
+# Grant the active logged-in user access to SteelSeries hidraw nodes for
+# chatmixd. 0x1038 = SteelSeries USB vendor ID. TAG+="uaccess" makes systemd-
+# logind put an ACL on the device for whoever owns the current graphical
+# session, so no static group membership (e.g. `audio`) is required.
+#
+# The single rule covers both the read-only report node and the Arctis Nova
+# Pro write node (idProduct 12e0) used for the init sequence, since uaccess
+# grants read+write.
+KERNEL=="hidraw*", ATTRS{idVendor}=="1038", TAG+="uaccess"
