@@ -1,15 +1,16 @@
-%global commit      1b924448e6b34c7d568962c232b8f562eb86e32f
-%global shortcommit %(c=%{commit}; echo ${c:0:7})
-%global snapdate    20260601
-
+# rpkg template. COPR's "rpkg" SCM build method preprocesses this at build
+# time, deriving the version/release/source straight from git -- so a plain
+# `git push` produces a new, correctly-ordered package with no manual edits.
+# The {{{ ... }}} macros come from rpkg-util.
 Name:           chatmixd
-Version:        0.2.0
-Release:        4.%{snapdate}git%{shortcommit}%{?dist}
+Version:        {{{ git_dir_version }}}
+Release:        1%{?dist}
 Summary:        SteelSeries ChatMix daemon for Linux (PipeWire/PulseAudio)
 
 License:        MIT
 URL:            https://github.com/UMCEKO/chatmixd
-Source0:        %{url}/archive/%{commit}/%{name}-%{shortcommit}.tar.gz
+VCS:            {{{ git_dir_vcs }}}
+Source0:        {{{ git_dir_pack }}}
 
 BuildRequires:  cargo
 BuildRequires:  rust
@@ -25,7 +26,7 @@ Chat virtual sinks under PipeWire, so the hardware dial mixes desktop audio
 against voice/chat the same way it does on Windows. Hardened fork of linuxmix.
 
 %prep
-%autosetup -n %{name}-%{commit}
+{{{ git_dir_setup_macro }}}
 
 %build
 # The crate has no third-party dependencies, so the build needs no network.
@@ -44,14 +45,4 @@ install -Dm0644 dist/99-%{name}.rules   %{buildroot}%{_udevrulesdir}/99-%{name}.
 %{_udevrulesdir}/99-%{name}.rules
 
 %changelog
-* Mon Jun 01 2026 UMCEKO <umutcevdetkocak@gmail.com> - 0.2.0-4.20260601git1b92444
-- Snapshot 1b92444: zero-initialize the HID read buffer
-
-* Mon Jun 01 2026 UMCEKO <umutcevdetkocak@gmail.com> - 0.2.0-3.20260601git82f42e5
-- Snapshot 82f42e5: log actionable errors instead of silent None
-
-* Mon Jun 01 2026 UMCEKO <umutcevdetkocak@gmail.com> - 0.2.0-2.20260601gitbeb0851
-- Snapshot beb0851: uaccess udev rule (no audio-group membership needed)
-
-* Mon Jun 01 2026 UMCEKO <umutcevdetkocak@gmail.com> - 0.2.0-1.20260601gitf55d034
-- Initial RPM packaging (git snapshot)
+{{{ git_dir_changelog }}}
