@@ -86,6 +86,9 @@ fn get_devices() -> Vec<File> {
             let dev = OpenOptions::new()
                 .read(true)
                 .open(format!("/dev/{name}"))
+                .inspect_err(|e| {
+                    eprintln!("Cannot open /dev/{name} (check udev rules / permissions): {e}")
+                })
                 .ok()?;
             println!("Listening to /dev/{name}");
             dev::determine_if_arctis_nova_pro(name);
@@ -100,6 +103,7 @@ fn get_device_id(device_name: &str) -> Option<u32> {
         .arg("sinks")
         .arg("short")
         .output()
+        .inspect_err(|e| eprintln!("Failed to run `pactl list sinks short`: {e}"))
         .ok()?;
     let stdout = String::from_utf8(pactl_out.stdout).ok()?;
 
@@ -134,6 +138,7 @@ fn find_steelseries_sink() -> Option<u32> {
         .arg("list")
         .arg("sinks")
         .output()
+        .inspect_err(|e| eprintln!("Failed to run `pactl list sinks`: {e}"))
         .ok()?;
     let stdout = String::from_utf8(out.stdout).ok()?;
 
@@ -166,7 +171,11 @@ fn get_default_sink() -> Option<u32> {
         return Some(id);
     }
 
-    let out = Command::new("pactl").arg("get-default-sink").output().ok()?;
+    let out = Command::new("pactl")
+        .arg("get-default-sink")
+        .output()
+        .inspect_err(|e| eprintln!("Failed to run `pactl get-default-sink`: {e}"))
+        .ok()?;
     let default_sink_name = String::from_utf8(out.stdout).ok()?.trim().to_owned();
 
     if default_sink_name.is_empty() || in_blacklist(&default_sink_name) {
