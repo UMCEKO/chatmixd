@@ -1,9 +1,8 @@
 use std::{
-    ffi::OsString,
     fs::{File, OpenOptions},
     io::Read,
     process::{Command, Stdio},
-    sync::{Mutex, OnceLock},
+    sync::{LazyLock, Mutex},
     thread, time,
 };
 
@@ -15,11 +14,15 @@ const GAME: &str = "Game";
 const CHAT: &str = "Chat";
 const SS_VENDOR_ID_PROP: &str = "0x1038"; // SteelSeries USB VID, as printed by `pactl list sinks`
 
-static HOME_DIR: OnceLock<String> = OnceLock::new();
+/// `$HOME` resolved at first access. `None` if unset or non-UTF-8 — in which
+/// case blacklist support is silently disabled (and `in_blacklist` returns
+/// false for every sink name).
+static HOME_DIR: LazyLock<Option<String>> = LazyLock::new(|| {
+    std::env::home_dir().and_then(|p| p.into_os_string().into_string().ok())
+});
 
 fn main() -> ! {
-    if let Some(home_dir) = std::env::home_dir().and_then(|f| f.into_os_string().into_string().ok())
-    {
+    if let Some(home_dir) = HOME_DIR.as_deref() {
         let config_dir = format!("{home_dir}/.config/chatmixd");
         let blacklist_path = format!("{config_dir}/blacklist.conf");
         if !std::fs::exists(&blacklist_path).unwrap_or_default() {
@@ -29,7 +32,7 @@ fn main() -> ! {
             // subsequent open() fail.
             if let Err(e) = std::fs::create_dir_all(&config_dir) {
                 eprintln!("Unable to create config dir {config_dir}: {e}");
-            } else if let Err(e) = std::fs::File::options()
+            } else if let Err(e) = File::options()
                 .write(true)
                 .create_new(true)
                 .open(&blacklist_path)
@@ -37,21 +40,20 @@ fn main() -> ! {
                 eprintln!("Unable to create blacklist file {blacklist_path}: {e}");
             }
         }
-        let _ = HOME_DIR.set(home_dir);
     } else {
         eprintln!("No HOME directory found; blacklist support disabled.");
     }
 
     loop {
         let devices = get_devices();
-        let mut threads = vec![];
-        for device in devices {
-            threads.push(thread::spawn(|| read_device(device)));
-        }
-
-        while threads.iter().any(|f| !f.is_finished()) {
-            thread::sleep(time::Duration::from_millis(100));
-        }
+        // `thread::scope` auto-joins all spawned threads at the end of the
+        // block, so we don't need a busy-poll + sleep to wait for any thread
+        // to finish, and we don't need 'static-bound closures.
+        thread::scope(|s| {
+            for device in devices {
+                s.spawn(|| read_device(device));
+            }
+        });
 
         eprintln!("All threads exited unexpectedly -- Restarting...");
         thread::sleep(time::Duration::from_secs(2));
@@ -70,8 +72,7 @@ fn get_devices() -> Vec<File> {
     entries
         .filter_map(|f| {
             let entry = f.ok()?;
-            let name_os: OsString = entry.file_name();
-            let name = name_os.into_string().ok()?;
+            let name = entry.file_name().into_string().ok()?;
             if !name.starts_with("hidraw") {
                 return None;
             }
@@ -110,21 +111,16 @@ fn get_device_id(device_name: &str) -> Option<u32> {
 }
 
 fn in_blacklist(sink_name: &str) -> bool {
-    let Some(home_dir) = HOME_DIR.get() else {
+    let Some(home_dir) = HOME_DIR.as_deref() else {
         return false;
     };
     let blacklist = std::fs::read_to_string(format!("{home_dir}/.config/chatmixd/blacklist.conf"))
         .unwrap_or_default();
-    for line in blacklist.lines().map(|f| f.trim()) {
-        if line.starts_with("#") {
-            continue;
-        }
-        if line == sink_name {
-            return true;
-        }
-    }
-
-    false
+    blacklist
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .any(|l| l == sink_name)
 }
 
 /// Scan `pactl list sinks` (long form) for a sink whose USB vendor ID
