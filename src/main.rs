@@ -1,8 +1,8 @@
 use std::{
     fs::{File, OpenOptions},
     io::Read,
-    process::{Command, Stdio},
-    sync::{LazyLock, Mutex},
+    process::{Child, Command, Stdio},
+    sync::{LazyLock, Mutex, MutexGuard},
     thread, time,
 };
 
@@ -20,6 +20,15 @@ const SS_VENDOR_ID_PROP: &str = "0x1038"; // SteelSeries USB VID, as printed by 
 static HOME_DIR: LazyLock<Option<String>> = LazyLock::new(|| {
     std::env::home_dir().and_then(|p| p.into_os_string().into_string().ok())
 });
+
+/// Long-lived `pw-loopback` child processes — one per chatmix channel. Each
+/// presents its capture side as a routable virtual sink (`Game`/`Chat`) and
+/// feeds the headset directly, so the whole signal path lives in the headset's
+/// single driver domain. This replaces the old `module-null-sink` +
+/// `module-loopback` pair, which put each channel on PipeWire's dummy-timer
+/// driver and then bridged it back to the device asynchronously — an extra
+/// scheduling hop plus a resampler buffer. Killing a child tears its sink down.
+static LOOPBACKS: Mutex<Vec<Child>> = Mutex::new(Vec::new());
 
 fn main() -> ! {
     if let Some(home_dir) = HOME_DIR.as_deref() {
@@ -97,23 +106,6 @@ fn get_devices() -> Vec<File> {
         .collect()
 }
 
-fn get_device_id(device_name: &str) -> Option<u32> {
-    let pactl_out = Command::new("pactl")
-        .arg("list")
-        .arg("sinks")
-        .arg("short")
-        .output()
-        .inspect_err(|e| eprintln!("Failed to run `pactl list sinks short`: {e}"))
-        .ok()?;
-    let stdout = String::from_utf8(pactl_out.stdout).ok()?;
-
-    stdout
-        .lines()
-        .find(|line| line.contains(device_name))
-        .and_then(|line| line.split_ascii_whitespace().next())
-        .and_then(|sink_code| sink_code.parse::<u32>().ok())
-}
-
 fn in_blacklist(sink_name: &str) -> bool {
     let Some(home_dir) = HOME_DIR.as_deref() else {
         return false;
@@ -128,12 +120,13 @@ fn in_blacklist(sink_name: &str) -> bool {
 }
 
 /// Scan `pactl list sinks` (long form) for a sink whose USB vendor ID
-/// matches SteelSeries. The chatmix routing target is the user's headset,
-/// not whatever PipeWire currently considers the system default — those
-/// can diverge (e.g. HDMI audio becomes default after a monitor wake, or
-/// the headset hasn't been promoted to default yet). Iterating sinks by
-/// vendor ID makes the target deterministic.
-fn find_steelseries_sink() -> Option<u32> {
+/// matches SteelSeries, returning its node name. The chatmix routing target is
+/// the user's headset, not whatever PipeWire currently considers the system
+/// default — those can diverge (e.g. HDMI audio becomes default after a monitor
+/// wake, or the headset hasn't been promoted to default yet). Iterating sinks
+/// by vendor ID makes the target deterministic. The node name (not the numeric
+/// index) is what `pw-loopback -P` needs to attach to.
+fn find_steelseries_sink() -> Option<String> {
     let out = Command::new("pactl")
         .arg("list")
         .arg("sinks")
@@ -142,33 +135,34 @@ fn find_steelseries_sink() -> Option<u32> {
         .ok()?;
     let stdout = String::from_utf8(out.stdout).ok()?;
 
-    let mut current_id: Option<u32> = None;
+    let mut current_name: Option<String> = None;
     let mut current_is_ss = false;
 
     for line in stdout.lines() {
         let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("Sink #") {
+        if trimmed.starts_with("Sink #") {
             if current_is_ss {
-                return current_id;
+                return current_name;
             }
-            current_id = rest.parse::<u32>().ok();
+            current_name = None;
             current_is_ss = false;
-        }
-        // pactl renders properties as: `device.vendor.id = "0x1038"`
-        if trimmed.starts_with("device.vendor.id") && trimmed.contains(SS_VENDOR_ID_PROP) {
+        } else if let Some(name) = trimmed.strip_prefix("Name: ") {
+            current_name = Some(name.to_owned());
+        } else if trimmed.starts_with("device.vendor.id") && trimmed.contains(SS_VENDOR_ID_PROP) {
+            // pactl renders properties as: `device.vendor.id = "0x1038"`
             current_is_ss = true;
         }
     }
-    if current_is_ss { current_id } else { None }
+    if current_is_ss { current_name } else { None }
 }
 
-fn get_default_sink() -> Option<u32> {
+fn get_default_sink() -> Option<String> {
     // Prefer a SteelSeries-owned sink for the chatmix routing target. Falls
     // back to the system default sink only if no SteelSeries sink is present
     // (e.g. headset entirely unplugged), in which case the original
     // default-sink + blacklist behaviour applies.
-    if let Some(id) = find_steelseries_sink() {
-        return Some(id);
+    if let Some(name) = find_steelseries_sink() {
+        return Some(name);
     }
 
     let out = Command::new("pactl")
@@ -182,7 +176,7 @@ fn get_default_sink() -> Option<u32> {
         return None;
     }
 
-    get_device_id(&default_sink_name)
+    Some(default_sink_name)
 }
 
 /// Run `pactl <args>` for side-effect; log on failure, don't panic.
@@ -201,30 +195,80 @@ fn pactl_run(args: &[&str]) {
     }
 }
 
+fn lock_loopbacks() -> MutexGuard<'static, Vec<Child>> {
+    // The lock only ever guards Vec<Child> mutation; a panic mid-mutation can't
+    // leave the Vec in a torn state, so recovering from poison is safe.
+    LOOPBACKS.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Spawn one `pw-loopback` whose capture side is the routable virtual sink
+/// `name` (Game/Chat) and whose playback side feeds `target` (the headset).
+/// Latency is left unpinned so the node follows the graph quantum: latency-
+/// sensitive apps (e.g. osu!) pull it down, idle playback relaxes it — no fixed
+/// floor forced on every other app sharing the headset.
+fn spawn_loopback(name: &str, target: &str) -> Option<Child> {
+    Command::new("pw-loopback")
+        .arg("-P")
+        .arg(target)
+        .arg("--capture-props")
+        .arg(format!(
+            "media.class=Audio/Sink node.name={name} node.description={name} audio.position=[FL,FR]"
+        ))
+        .arg("--playback-props")
+        .arg("stream.dont-remix=true")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .inspect_err(|e| eprintln!("Failed to spawn pw-loopback for {name}: {e}"))
+        .ok()
+}
+
+fn sink_exists(name: &str) -> bool {
+    Command::new("pactl")
+        .args(["list", "sinks", "short"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.lines().any(|l| l.split_whitespace().nth(1) == Some(name)))
+        .unwrap_or(false)
+}
+
+/// `pw-loopback` registers its sink asynchronously, so poll briefly (up to ~1s)
+/// for it to appear before we depend on it.
+fn wait_for_sink(name: &str) -> bool {
+    for _ in 0..50 {
+        if sink_exists(name) {
+            return true;
+        }
+        thread::sleep(time::Duration::from_millis(20));
+    }
+    false
+}
+
 fn configure_sinks() -> bool {
     // Prevent creating duplicate sinks, which would otherwise happen if the service is abruptly restarted
     cleanup_sinks();
 
-    let Some(default_sink) = get_default_sink() else {
+    let Some(target) = get_default_sink() else {
         return false;
     };
 
-    let sink_id = default_sink.to_string();
+    {
+        let mut guard = lock_loopbacks();
+        for name in [GAME, CHAT] {
+            if let Some(child) = spawn_loopback(name, &target) {
+                guard.push(child);
+            }
+        }
+    }
 
-    pactl_run(&["load-module", "module-null-sink", &format!("sink_name={GAME}")]);
-    pactl_run(&["load-module", "module-null-sink", &format!("sink_name={CHAT}")]);
-    pactl_run(&[
-        "load-module",
-        "module-loopback",
-        &format!("source={GAME}.monitor"),
-        &format!("sink={sink_id}"),
-    ]);
-    pactl_run(&[
-        "load-module",
-        "module-loopback",
-        &format!("source={CHAT}.monitor"),
-        &format!("sink={sink_id}"),
-    ]);
+    // Both sinks must come up; if either failed to spawn or never registered,
+    // tear the partial state back down so we retry cleanly on the next packet.
+    if !wait_for_sink(GAME) || !wait_for_sink(CHAT) {
+        eprintln!("chatmix sinks did not come up; tearing down partial state");
+        cleanup_sinks();
+        return false;
+    }
 
     // Promote Game to default sink ONCE on (re)configuration so generic
     // applications route through the chatmix split. Previously this was
@@ -294,33 +338,46 @@ fn process_bytes(bytes: [u8; 4]) {
 }
 
 fn cleanup_sinks() {
-    pactl_run(&["unload-module", "module-loopback"]);
-
-    let destroy_sinks = |name: &str| {
-        loop {
-            let out = match Command::new("pw-cli")
-                .arg("destroy")
-                .arg(name)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .output()
-            {
-                Ok(o) => o,
-                Err(e) => {
-                    eprintln!("Failed to spawn pw-cli destroy {name}: {e}");
-                    return;
-                }
-            };
-
-            // pw-cli prints to stderr whenever an error occurs (e.g. no sink by
-            // that name). Despite that, the exit status is still 0. Loop until
-            // stderr is non-empty, meaning no more instances of the sink remain.
-            if !out.stderr.is_empty() {
-                break;
-            }
+    // Kill the pw-loopback children we own. Each owns exactly one Game/Chat
+    // loopback-sink, which disappears when its process exits. This is scoped to
+    // our own processes — unlike the previous `pactl unload-module
+    // module-loopback`, which (with no module index) unloaded EVERY loopback on
+    // the system, clobbering unrelated ones the user may run.
+    {
+        let mut guard = lock_loopbacks();
+        for mut child in guard.drain(..) {
+            let _ = child.kill();
+            let _ = child.wait(); // reap so we don't leave zombies
         }
-    };
+    }
 
-    destroy_sinks(GAME);
-    destroy_sinks(CHAT);
+    // Safety net: a previous daemon instance that was hard-killed (so its
+    // children outlived it, or its Drop never ran) may have left orphaned
+    // Game/Chat sinks. Destroy any lingering ones by name.
+    destroy_orphan_sinks(GAME);
+    destroy_orphan_sinks(CHAT);
+}
+
+fn destroy_orphan_sinks(name: &str) {
+    // pw-cli destroy prints to stderr (but still exits 0) when no node by that
+    // name remains. Loop until that happens — bounded, so a persistent error
+    // can't hang the daemon.
+    for _ in 0..16 {
+        let out = match Command::new("pw-cli")
+            .arg("destroy")
+            .arg(name)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+        {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("Failed to spawn pw-cli destroy {name}: {e}");
+                return;
+            }
+        };
+        if !out.stderr.is_empty() {
+            break;
+        }
+    }
 }
