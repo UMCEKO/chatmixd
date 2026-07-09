@@ -49,6 +49,35 @@ sudo dnf install chatmixd
 systemctl --user enable --now chatmixd
 ```
 
+### NixOS (flake)
+
+Add the flake as an input and import the NixOS module, which installs the
+binary, the udev rules, and the systemd user service:
+
+```nix
+{
+  inputs.chatmixd.url = "github:UMCEKO/chatmixd";
+
+  # in your NixOS configuration:
+  imports = [ chatmixd.nixosModules.default ];
+  services.chatmixd.enable = true;
+}
+```
+
+On a channel-based (non-flake) system, the module also works imported
+directly from a checkout — it builds the package from source on rebuild:
+
+```nix
+{
+  imports = [ /path/to/chatmixd/nix/module.nix ];
+  services.chatmixd.enable = true;
+}
+```
+
+The service starts automatically on login; no `systemctl enable` needed.
+To just try the daemon without installing: `nix run github:UMCEKO/chatmixd`
+(note the udev rules granting hidraw access only apply via the module).
+
 ### From source
 
 ```sh
