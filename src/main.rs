@@ -30,6 +30,10 @@ static HOME_DIR: LazyLock<Option<String>> = LazyLock::new(|| {
 /// scheduling hop plus a resampler buffer. Killing a child tears its sink down.
 static LOOPBACKS: Mutex<Vec<Child>> = Mutex::new(Vec::new());
 
+/// Whether the Game/Chat sinks are currently configured. Shared between the
+/// HID packet handler and the startup-configuration thread.
+static IS_CONF: Mutex<bool> = Mutex::new(false);
+
 fn main() -> ! {
     if let Some(home_dir) = HOME_DIR.as_deref() {
         let config_dir = format!("{home_dir}/.config/chatmixd");
@@ -52,6 +56,13 @@ fn main() -> ! {
     } else {
         eprintln!("No HOME directory found; blacklist support disabled.");
     }
+
+    // The headset is often already powered on when the daemon starts (e.g.
+    // across a reboot): it then never sends a power-on report, and the first
+    // chatmix packet only arrives when the dial is next moved — leaving the
+    // system without Game/Chat sinks until then. Configure up front as soon as
+    // the headset's sink is visible in PipeWire.
+    thread::spawn(configure_at_startup);
 
     loop {
         let devices = get_devices();
@@ -245,11 +256,30 @@ fn wait_for_sink(name: &str) -> bool {
     false
 }
 
+/// One-shot startup path: wait (up to ~2 min) for a SteelSeries sink to show
+/// up in PipeWire, then build the Game/Chat sinks if a HID event hasn't
+/// already. Runs in its own thread so device reading starts immediately.
+fn configure_at_startup() {
+    for _ in 0..60 {
+        if find_steelseries_sink().is_some() {
+            if let Ok(mut conf) = IS_CONF.lock()
+                && !*conf
+            {
+                *conf = configure_sinks();
+            }
+            return;
+        }
+        thread::sleep(time::Duration::from_secs(2));
+    }
+    eprintln!("No SteelSeries sink appeared; sinks will be configured on the first headset event");
+}
+
 fn configure_sinks() -> bool {
     // Prevent creating duplicate sinks, which would otherwise happen if the service is abruptly restarted
     cleanup_sinks();
 
     let Some(target) = get_default_sink() else {
+        eprintln!("No usable routing target (no SteelSeries sink; default sink empty or blacklisted)");
         return false;
     };
 
@@ -276,6 +306,7 @@ fn configure_sinks() -> bool {
     // default sink on every micro-twist of the chatmix dial.
     pactl_run(&["set-default-sink", GAME]);
 
+    eprintln!("Configured chatmix sinks (routing to {target})");
     true
 }
 
@@ -287,8 +318,6 @@ fn read_device(mut file: File) {
 }
 
 fn process_bytes(bytes: [u8; 4]) {
-    static IS_CONF: Mutex<bool> = Mutex::new(false);
-
     let set_volume = |channel: &str, vol: u8| {
         pactl_run(&["set-sink-volume", channel, &format!("{vol}%")]);
     };
