@@ -6,6 +6,8 @@ use std::{
 
 const SS_VENDOR_ID: u16 = 0x1038;
 const NOVA_PRO_PROD_ID: u16 = 0x12e0;
+const NOVA_7_PROD_IDS: [u16; 2] = [0x2202, 0x22a1];
+const NOVA_7_STATUS_INTERFACE: &str = "3";
 
 /// Parse `HID_ID=<bus>:<vid>:<pid>` from `/sys/class/hidraw/<device>/device/uevent`.
 /// Returns `(vendor_id, product_id)` if found, else `None`.
@@ -37,6 +39,18 @@ fn read_hid_id(device: &str) -> Option<(u16, u16)> {
 /// released, causing volumes to snap to nonsense values like (23, 0).
 pub fn is_steelseries(device: &str) -> bool {
     matches!(read_hid_id(device), Some((SS_VENDOR_ID, _)))
+}
+
+/// Whether this hidraw node is the Arctis Nova 7 interface that answers status queries.
+pub fn is_nova_7_status_node(device: &str) -> bool {
+    if !matches!(read_hid_id(device), Some((SS_VENDOR_ID, pid)) if NOVA_7_PROD_IDS.contains(&pid)) {
+        return false;
+    }
+    // The HID device's parent is the USB interface, named like `1-10:1.3`.
+    std::fs::canonicalize(format!("/sys/class/hidraw/{device}/device"))
+        .ok()
+        .and_then(|p| Some(p.parent()?.file_name()?.to_str()?.rsplit('.').next()? == NOVA_7_STATUS_INTERFACE))
+        .unwrap_or(false)
 }
 
 pub fn determine_if_arctis_nova_pro(device: String) {
